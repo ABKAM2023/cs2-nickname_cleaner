@@ -26,8 +26,9 @@ static const char* kWhitelistPath = "addons/configs/nickname_cleaner/whitelist.t
 static const char* kBlocklistPath = "addons/configs/nickname_cleaner/blocklist.txt";
 static std::string g_sDefaultName = "Player";
 
-std::unordered_set<std::string> g_Whitelist;
-std::unordered_set<std::string> g_Blocklist;
+std::vector<std::string> g_Whitelist;
+std::vector<std::string> g_Blocklist;
+std::vector<std::string> g_BlocklistSuffixes;
 
 CGameEntitySystem* GameEntitySystem()
 {
@@ -55,7 +56,7 @@ static std::string Trim(const std::string& text)
 	return text.substr(first, last - first + 1);
 }
 
-static void LoadList(const char* path, std::unordered_set<std::string>& out, const char* label)
+static void LoadList(const char* path, std::vector<std::string>& out, const char* label)
 {
 	out.clear();
 	if (!g_pFullFileSystem)
@@ -83,7 +84,7 @@ static void LoadList(const char* path, std::unordered_set<std::string>& out, con
 		if (line.rfind("#", 0) == 0 || line.rfind("//", 0) == 0)
 			continue;
 		line = ToLower(line);
-		out.insert(line);
+		out.push_back(line);
 	}
 }
 
@@ -106,16 +107,39 @@ static void LoadConfig()
 static void LoadWhitelist()
 {
 	LoadList(kWhitelistPath, g_Whitelist, "Whitelist");
+	std::sort(g_Whitelist.begin(), g_Whitelist.end());
+	g_Whitelist.erase(std::unique(g_Whitelist.begin(), g_Whitelist.end()), g_Whitelist.end());
 }
 
 static void LoadBlocklist()
 {
-	LoadList(kBlocklistPath, g_Blocklist, "Blocklist");
+	std::vector<std::string> temp;
+	LoadList(kBlocklistPath, temp, "Blocklist");
+
+	g_Blocklist.clear();
+	g_BlocklistSuffixes.clear();
+
+	for (const auto& item : temp)
+	{
+		if (item.size() > 2 && item[0] == '*' && item[1] == '.')
+		{
+			g_BlocklistSuffixes.push_back(item.substr(1));
+		}
+		else
+		{
+			g_Blocklist.push_back(item);
+		}
+	}
+
+	std::sort(g_Blocklist.begin(), g_Blocklist.end());
+	g_Blocklist.erase(std::unique(g_Blocklist.begin(), g_Blocklist.end()), g_Blocklist.end());
+
+	std::sort(g_BlocklistSuffixes.begin(), g_BlocklistSuffixes.end());
+	g_BlocklistSuffixes.erase(std::unique(g_BlocklistSuffixes.begin(), g_BlocklistSuffixes.end()), g_BlocklistSuffixes.end());
 }
 
-static bool IsWhitelistedToken(const std::string& token)
+static bool IsWhitelistedToken(const std::string& lower)
 {
-	const std::string lower = ToLower(token);
 	for (const auto& allowed : g_Whitelist)
 	{
 		if (lower.find(allowed) != std::string::npos)
@@ -124,25 +148,21 @@ static bool IsWhitelistedToken(const std::string& token)
 	return false;
 }
 
-static bool IsBlockedToken(const std::string& token)
+static bool IsBlockedToken(const std::string& lower)
 {
-	const std::string lower = ToLower(token);
+	for (const auto& suffix : g_BlocklistSuffixes)
+	{
+		if (lower.size() >= suffix.size() && 
+			lower.compare(lower.size() - suffix.size(), suffix.size(), suffix) == 0)
+		{
+			return true;
+		}
+	}
+
 	for (const auto& blocked : g_Blocklist)
 	{
-		if (blocked.size() > 2 && blocked[0] == '*' && blocked[1] == '.')
-		{
-			std::string suffix = blocked.substr(1);
-			if (lower.size() >= suffix.size() && 
-				lower.compare(lower.size() - suffix.size(), suffix.size(), suffix) == 0)
-			{
-				return true;
-			}
-		}
-		else
-		{
-			if (lower.find(blocked) != std::string::npos)
-				return true;
-		}
+		if (lower.find(blocked) != std::string::npos)
+			return true;
 	}
 	return false;
 }
@@ -157,9 +177,8 @@ static std::string StripPunctuation(std::string token)
 	return token;
 }
 
-static bool LooksLikeAddress(const std::string& token)
+static bool LooksLikeAddress(const std::string& lower)
 {
-	const std::string lower = ToLower(token);
 	if (lower.find("http://") != std::string::npos || lower.find("https://") != std::string::npos || lower.find("www.") != std::string::npos)
 		return true;
 
@@ -178,19 +197,21 @@ static std::string CleanNickname(const std::string& rawName)
 		if (simplified.empty())
 			continue;
 
-		if (IsWhitelistedToken(simplified))
+		std::string simplifiedLower = ToLower(simplified);
+
+		if (IsWhitelistedToken(simplifiedLower))
 		{
 			keptTokens.push_back(simplified);
 			continue;
 		}
 
-		if (IsBlockedToken(simplified))
+		if (IsBlockedToken(simplifiedLower))
 		{
 			blockedTokens.push_back(simplified);
 			continue;
 		}
 
-		if (LooksLikeAddress(simplified))
+		if (LooksLikeAddress(simplifiedLower))
 			continue;
 
 		keptTokens.push_back(simplified);
@@ -310,7 +331,7 @@ const char* nickname_cleaner::GetLicense()
 
 const char* nickname_cleaner::GetVersion()
 {
-	return "1.0";
+	return "1.0.1";
 }
 
 const char* nickname_cleaner::GetDate()
