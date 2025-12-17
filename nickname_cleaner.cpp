@@ -217,17 +217,57 @@ static std::string CleanNickname(const std::string& rawName)
 	return cleaned.empty() ? g_sDefaultName : cleaned;
 }
 
-static bool ApplyCleanName(int iSlot, uint64 iSteamID64, bool logUnchanged = true)
+static bool ApplyCleanName(int iSlot, uint64 iSteamID64)
 {
 	if (!g_pPlayers)
 		return false;
+	if (iSlot < 0 || iSlot >= 64)
+		return false;
+	if (g_pPlayers->IsFakeClient(iSlot))
+		return false;
+
+	const uint64 currentSteamId = g_pPlayers->GetSteamID64(iSlot);
+	if (currentSteamId != 0 && iSteamID64 != 0 && currentSteamId != iSteamID64)
+		return false;
+
 	const char* szName = g_pPlayers->GetPlayerName(iSlot);
-	if (!szName)
+	if (!szName || !szName[0])
 		return false;
 
 	const std::string cleaned = CleanNickname(szName);
+	if (cleaned == szName)
+		return false;
 	g_pPlayers->SetPlayerName(iSlot, cleaned.c_str());
 	return true;
+}
+
+static void ApplyCleanNameForAllPlayers()
+{
+	if (!g_pPlayers)
+		return;
+	for (int iSlot = 0; iSlot < 64; iSlot++)
+	{
+		ApplyCleanName(iSlot, 0);
+	}
+}
+
+static void StartBurstEnforce(float intervalSeconds, int tries)
+{
+	if (!g_pUtils)
+		return;
+	int triesLeft = tries;
+	g_pUtils->CreateTimer(intervalSeconds, [intervalSeconds, triesLeft]() mutable -> float
+	{
+		if (!g_pPlayers || !g_pUtils)
+			return -1.0f;
+
+		ApplyCleanNameForAllPlayers();
+
+		if (--triesLeft <= 0)
+			return -1.0f;
+
+		return intervalSeconds;
+	});
 }
 
 bool nickname_cleaner::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool late)
@@ -280,26 +320,55 @@ void nickname_cleaner::AllPluginsLoaded()
 	LoadBlocklist();
 	g_pUtils->StartupServer(g_PLID, StartupServer);
 
+	g_pUtils->HookEvent(g_PLID, "player_changename", [](const char* /*szEventName*/, IGameEvent* pEvent, bool /*bDontBroadcast*/)
+	{
+		if (!g_pPlayers || !pEvent)
+			return;
+
+		StartBurstEnforce(0.25f, 12);
+	});
+
+	auto roundEnforce = [](const char* /*szEventName*/, IGameEvent* pEvent, bool /*bDontBroadcast*/)
+	{
+		if (!g_pPlayers || !pEvent)
+			return;
+
+		StartBurstEnforce(0.5f, 12);
+	};
+	g_pUtils->HookEvent(g_PLID, "round_start", roundEnforce);
+	g_pUtils->HookEvent(g_PLID, "round_prestart", roundEnforce);
+	g_pUtils->HookEvent(g_PLID, "round_freeze_end", roundEnforce);
+	g_pUtils->HookEvent(g_PLID, "round_end", roundEnforce);
+	g_pUtils->HookEvent(g_PLID, "round_poststart", roundEnforce);
+
+	g_pUtils->CreateTimer(5.0f, []() -> float
+	{
+		if (!g_pPlayers || !g_pUtils)
+			return -1.0f;
+		ApplyCleanNameForAllPlayers();
+		return 5.0f;
+	});
+
 	g_pPlayers->HookOnClientAuthorized(g_PLID, [](int iSlot, uint64 iSteamID64)
 	{
 		if (!g_pPlayers || !g_pUtils)
 			return;
-		if (g_pPlayers->IsFakeClient(iSlot))
-			return;
 
-		const char* szName = g_pPlayers->GetPlayerName(iSlot);
-		if (!szName)
-			return;
-
-		const bool renamed = ApplyCleanName(iSlot, iSteamID64, true);
-		if (renamed)
+		ApplyCleanName(iSlot, iSteamID64);
+		int triesLeft = 20;
+		g_pUtils->CreateTimer(0.25f, [iSlot, iSteamID64, triesLeft]() mutable -> float
 		{
-			g_pUtils->CreateTimer(0.1f, [iSlot, iSteamID64]() -> float
-			{
-				ApplyCleanName(iSlot, iSteamID64, false);
-				return 0.0f;
-			});
-		}
+			if (!g_pPlayers || !g_pUtils)
+				return -1.0f;
+
+			if (ApplyCleanName(iSlot, iSteamID64))
+				return -1.0f;
+
+			if (--triesLeft <= 0)
+				return -1.0f;
+
+			return 0.25f;
+		});
 	});
 }
 
@@ -310,7 +379,7 @@ const char* nickname_cleaner::GetLicense()
 
 const char* nickname_cleaner::GetVersion()
 {
-	return "1.0";
+	return "1.0.2";
 }
 
 const char* nickname_cleaner::GetDate()
