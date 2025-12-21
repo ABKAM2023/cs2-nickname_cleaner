@@ -26,9 +26,8 @@ static const char* kWhitelistPath = "addons/configs/nickname_cleaner/whitelist.t
 static const char* kBlocklistPath = "addons/configs/nickname_cleaner/blocklist.txt";
 static std::string g_sDefaultName = "Player";
 
-std::vector<std::string> g_Whitelist;
-std::vector<std::string> g_Blocklist;
-std::vector<std::string> g_BlocklistSuffixes;
+std::unordered_set<std::string> g_Whitelist;
+std::unordered_set<std::string> g_Blocklist;
 
 CGameEntitySystem* GameEntitySystem()
 {
@@ -56,7 +55,7 @@ static std::string Trim(const std::string& text)
 	return text.substr(first, last - first + 1);
 }
 
-static void LoadList(const char* path, std::vector<std::string>& out, const char* label)
+static void LoadList(const char* path, std::unordered_set<std::string>& out, const char* label)
 {
 	out.clear();
 	if (!g_pFullFileSystem)
@@ -84,7 +83,7 @@ static void LoadList(const char* path, std::vector<std::string>& out, const char
 		if (line.rfind("#", 0) == 0 || line.rfind("//", 0) == 0)
 			continue;
 		line = ToLower(line);
-		out.push_back(line);
+		out.insert(line);
 	}
 }
 
@@ -107,39 +106,16 @@ static void LoadConfig()
 static void LoadWhitelist()
 {
 	LoadList(kWhitelistPath, g_Whitelist, "Whitelist");
-	std::sort(g_Whitelist.begin(), g_Whitelist.end());
-	g_Whitelist.erase(std::unique(g_Whitelist.begin(), g_Whitelist.end()), g_Whitelist.end());
 }
 
 static void LoadBlocklist()
 {
-	std::vector<std::string> temp;
-	LoadList(kBlocklistPath, temp, "Blocklist");
-
-	g_Blocklist.clear();
-	g_BlocklistSuffixes.clear();
-
-	for (const auto& item : temp)
-	{
-		if (item.size() > 2 && item[0] == '*' && item[1] == '.')
-		{
-			g_BlocklistSuffixes.push_back(item.substr(1));
-		}
-		else
-		{
-			g_Blocklist.push_back(item);
-		}
-	}
-
-	std::sort(g_Blocklist.begin(), g_Blocklist.end());
-	g_Blocklist.erase(std::unique(g_Blocklist.begin(), g_Blocklist.end()), g_Blocklist.end());
-
-	std::sort(g_BlocklistSuffixes.begin(), g_BlocklistSuffixes.end());
-	g_BlocklistSuffixes.erase(std::unique(g_BlocklistSuffixes.begin(), g_BlocklistSuffixes.end()), g_BlocklistSuffixes.end());
+	LoadList(kBlocklistPath, g_Blocklist, "Blocklist");
 }
 
-static bool IsWhitelistedToken(const std::string& lower)
+static bool IsWhitelistedToken(const std::string& token)
 {
+	const std::string lower = ToLower(token);
 	for (const auto& allowed : g_Whitelist)
 	{
 		if (lower.find(allowed) != std::string::npos)
@@ -148,21 +124,25 @@ static bool IsWhitelistedToken(const std::string& lower)
 	return false;
 }
 
-static bool IsBlockedToken(const std::string& lower)
+static bool IsBlockedToken(const std::string& token)
 {
-	for (const auto& suffix : g_BlocklistSuffixes)
-	{
-		if (lower.size() >= suffix.size() && 
-			lower.compare(lower.size() - suffix.size(), suffix.size(), suffix) == 0)
-		{
-			return true;
-		}
-	}
-
+	const std::string lower = ToLower(token);
 	for (const auto& blocked : g_Blocklist)
 	{
-		if (lower.find(blocked) != std::string::npos)
-			return true;
+		if (blocked.size() > 2 && blocked[0] == '*' && blocked[1] == '.')
+		{
+			std::string suffix = blocked.substr(1);
+			if (lower.size() >= suffix.size() && 
+				lower.compare(lower.size() - suffix.size(), suffix.size(), suffix) == 0)
+			{
+				return true;
+			}
+		}
+		else
+		{
+			if (lower.find(blocked) != std::string::npos)
+				return true;
+		}
 	}
 	return false;
 }
@@ -177,8 +157,9 @@ static std::string StripPunctuation(std::string token)
 	return token;
 }
 
-static bool LooksLikeAddress(const std::string& lower)
+static bool LooksLikeAddress(const std::string& token)
 {
+	const std::string lower = ToLower(token);
 	if (lower.find("http://") != std::string::npos || lower.find("https://") != std::string::npos || lower.find("www.") != std::string::npos)
 		return true;
 
@@ -197,21 +178,19 @@ static std::string CleanNickname(const std::string& rawName)
 		if (simplified.empty())
 			continue;
 
-		std::string simplifiedLower = ToLower(simplified);
-
-		if (IsWhitelistedToken(simplifiedLower))
+		if (IsWhitelistedToken(simplified))
 		{
 			keptTokens.push_back(simplified);
 			continue;
 		}
 
-		if (IsBlockedToken(simplifiedLower))
+		if (IsBlockedToken(simplified))
 		{
 			blockedTokens.push_back(simplified);
 			continue;
 		}
 
-		if (LooksLikeAddress(simplifiedLower))
+		if (LooksLikeAddress(simplified))
 			continue;
 
 		keptTokens.push_back(simplified);
@@ -238,17 +217,38 @@ static std::string CleanNickname(const std::string& rawName)
 	return cleaned.empty() ? g_sDefaultName : cleaned;
 }
 
-static bool ApplyCleanName(int iSlot, uint64 iSteamID64, bool logUnchanged = true)
+static bool ApplyCleanName(int iSlot, uint64 iSteamID64)
 {
 	if (!g_pPlayers)
 		return false;
+	if (iSlot < 0 || iSlot >= 64)
+		return false;
+	if (g_pPlayers->IsFakeClient(iSlot))
+		return false;
+
+	const uint64 currentSteamId = g_pPlayers->GetSteamID64(iSlot);
+	if (currentSteamId != 0 && iSteamID64 != 0 && currentSteamId != iSteamID64)
+		return false;
+
 	const char* szName = g_pPlayers->GetPlayerName(iSlot);
-	if (!szName)
+	if (!szName || !szName[0])
 		return false;
 
 	const std::string cleaned = CleanNickname(szName);
+	if (cleaned == szName)
+		return false;
 	g_pPlayers->SetPlayerName(iSlot, cleaned.c_str());
 	return true;
+}
+
+static void ApplyCleanNameForAllPlayers()
+{
+	if (!g_pPlayers)
+		return;
+	for (int iSlot = 0; iSlot < 64; iSlot++)
+	{
+		ApplyCleanName(iSlot, 0);
+	}
 }
 
 bool nickname_cleaner::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool late)
@@ -301,26 +301,31 @@ void nickname_cleaner::AllPluginsLoaded()
 	LoadBlocklist();
 	g_pUtils->StartupServer(g_PLID, StartupServer);
 
+	g_pUtils->HookEvent(g_PLID, "round_prestart", [](const char* /*szEventName*/, IGameEvent* pEvent, bool /*bDontBroadcast*/)
+	{
+		if (!g_pPlayers || !pEvent)
+			return;
+		ApplyCleanNameForAllPlayers();
+	});
+
+	g_pUtils->HookEvent(g_PLID, "player_spawn", [](const char* /*szEventName*/, IGameEvent* pEvent, bool /*bDontBroadcast*/)
+	{
+		if (!g_pPlayers || !pEvent)
+			return;
+		g_pUtils->CreateTimer(1.0f, []() -> float
+		{
+			if (!g_pPlayers || !g_pUtils)
+				return -1.0f;
+			ApplyCleanNameForAllPlayers();
+			return -1.0f; 
+		});
+	});
+
 	g_pPlayers->HookOnClientAuthorized(g_PLID, [](int iSlot, uint64 iSteamID64)
 	{
 		if (!g_pPlayers || !g_pUtils)
 			return;
-		if (g_pPlayers->IsFakeClient(iSlot))
-			return;
-
-		const char* szName = g_pPlayers->GetPlayerName(iSlot);
-		if (!szName)
-			return;
-
-		const bool renamed = ApplyCleanName(iSlot, iSteamID64, true);
-		if (renamed)
-		{
-			g_pUtils->CreateTimer(0.1f, [iSlot, iSteamID64]() -> float
-			{
-				ApplyCleanName(iSlot, iSteamID64, false);
-				return 0.0f;
-			});
-		}
+		ApplyCleanName(iSlot, iSteamID64);
 	});
 }
 
@@ -331,7 +336,7 @@ const char* nickname_cleaner::GetLicense()
 
 const char* nickname_cleaner::GetVersion()
 {
-	return "1.0.1";
+	return "1.0.3";
 }
 
 const char* nickname_cleaner::GetDate()
